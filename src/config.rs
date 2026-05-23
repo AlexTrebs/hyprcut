@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
+use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebouncedEventKind};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -70,6 +72,37 @@ fn create_default(path: &PathBuf) -> anyhow::Result<()> {
 }
 
 const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
+
+/// Starts a background thread watching the config file for changes.
+/// On change, reloads and sends ConfigReloaded via the async channel.
+pub fn watch(sender: async_channel::Sender<crate::state::OverlayMessage>) -> anyhow::Result<()> {
+    let path = config_path();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut debouncer = new_debouncer(Duration::from_millis(500), tx)?;
+    debouncer.watcher().watch(&path, RecursiveMode::NonRecursive)?;
+
+    std::thread::spawn(move || {
+        let _keep_alive = debouncer;
+        for result in rx {
+            match result {
+                Ok(events) => {
+                    let changed = events.iter().any(|e| e.kind == DebouncedEventKind::Any);
+                    if changed {
+                        match load() {
+                            Ok(config) => {
+                                let _ = sender.send_blocking(crate::state::OverlayMessage::ConfigReloaded(config));
+                            }
+                            Err(e) => eprintln!("hyprcut: config reload error: {e}"),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("hyprcut: file watcher error: {e}"),
+            }
+        }
+    });
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
