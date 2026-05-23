@@ -1,0 +1,60 @@
+[overlay]
+position_x = 1800
+position_y = 30
+opacity = 0.75
+font_size = 14
+# text_color = "#ffffff"
+# border_color = "#000000"
+
+# ─── Zen Browser ─────────────────────────────────────────────────────────────
+# Find your window class with: hyprctl activewindow
+[apps.zen]
+name = "Zen Browser"
+shortcuts = [
+    { keys = "Ctrl+L",         label = "Focus address bar" },
+    { keys = "Ctrl+T",         label = "New tab" },
+    { keys = "Ctrl+W",         label = "Close tab" },
+    { keys = "Ctrl+Tab",       label = "Next tab" },
+    { keys = "Ctrl+Shift+Tab", label = "Previous tab" },
+    { keys = "Ctrl+R",         label = "Reload" },
+    { keys = "Ctrl+H",         label = "History" },
+]
+
+# ─── Neovim in Alacritty ─────────────────────────────────────────────────────
+# Launch with: alacritty --class nvim-terminal
+[apps.nvim-terminal]
+name = "Neovim"
+
+[apps.nvim-terminal.shortcuts]
+tmux = [
+    { keys = "Ctrl+B C",     label = "New window" },
+    { keys = "Ctrl+B %",     label = "Split vertical" },
+    { keys = "Ctrl+B \"",    label = "Split horizontal" },
+    { keys = "Ctrl+B Arrow", label = "Navigate pane" },
+    { keys = "Ctrl+B Z",     label = "Zoom pane" },
+]
+nvim = [
+    { keys = ":w",           label = "Save" },
+    { keys = ":q",           label = "Quit" },
+    { keys = "gg / G",       label = "Top / Bottom" },
+    { keys = "Ctrl+]",       label = "Jump to definition" },
+    { keys = "Space",        label = "Leader key" },
+]
+
+# ─── DaVinci Resolve ─────────────────────────────────────────────────────────
+# Verify class with: hyprctl activewindow (may be "resolve" or "DaVinciResolve")
+[apps.resolve]
+name = "DaVinci Resolve"
+
+[apps.resolve.shortcuts]
+playback = [
+    { keys = "Space",        label = "Play / Pause" },
+    { keys = "J / K / L",   label = "Reverse / Stop / Forward" },
+    { keys = "I / O",       label = "In / Out point" },
+]
+editing = [
+    { keys = "Ctrl+B",       label = "Blade (cut)" },
+    { keys = "Ctrl+Z",       label = "Undo" },
+    { keys = "Ctrl+Shift+Z", label = "Redo" },
+    { keys = "Ctrl+D",       label = "Delete gap" },
+]
