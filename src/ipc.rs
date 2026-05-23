@@ -1,5 +1,7 @@
 use std::sync::mpsc::Sender;
 use hyprland::event_listener::EventListener;
+use hyprland::data::{Client, Monitors};
+use hyprland::shared::{HyprData, HyprDataActiveOptional};
 use crate::state::OverlayMessage;
 
 pub fn normalize_class(class: &str) -> String {
@@ -14,7 +16,19 @@ pub fn start_listener(sender: Sender<OverlayMessage>) -> anyhow::Result<()> {
         let class = data
             .map(|w| normalize_class(&w.class))
             .filter(|c| !c.is_empty());
-        let _ = sender.send(OverlayMessage::ActiveWindowChanged(class));
+        let monitor_info = Client::get_active()
+            .ok()
+            .flatten()
+            .and_then(|client| {
+                Monitors::get().ok().and_then(|monitors| {
+                    monitors.into_iter()
+                        .find(|m| Some(m.id) == client.monitor)
+                        .map(|m| (m.name.clone(), m.scale as f64))
+                })
+            });
+        let monitor_name = monitor_info.as_ref().map(|(n, _)| n.clone());
+        let display_scale = monitor_info.map(|(_, s)| s).unwrap_or(1.0);
+        let _ = sender.send(OverlayMessage::ActiveWindowChanged(class, monitor_name, display_scale));
     });
 
     listener.start_listener()?;

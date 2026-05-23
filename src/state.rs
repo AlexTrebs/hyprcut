@@ -4,7 +4,8 @@ use crate::config::{AppConfig, Config};
 /// Messages sent from background threads to the GTK main loop.
 /// Must be Send — Config and its fields are all Send.
 pub enum OverlayMessage {
-    ActiveWindowChanged(Option<String>),
+    /// (window_class, hyprland_monitor_connector e.g. "DP-1", display scale factor)
+    ActiveWindowChanged(Option<String>, Option<String>, f64),
     ConfigReloaded(Config),
 }
 
@@ -24,6 +25,10 @@ mod tests {
             shortcuts: ShortcutList::Flat(vec![
                 Shortcut { keys: "Ctrl+T".into(), label: "Test".into() },
             ]),
+            bg_color: None,
+            text_color: None,
+            position_x: None,
+            position_y: None,
         }
     }
 

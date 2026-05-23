@@ -18,6 +18,7 @@ pub struct OverlayConfig {
     pub position_y: i32,
     pub opacity: f64,
     pub font_size: u32,
+    pub bg_color: Option<String>,
     pub text_color: Option<String>,
     pub border_color: Option<String>,
 }
@@ -27,6 +28,10 @@ pub struct AppConfig {
     pub name: String,
     #[serde(default)]
     pub shortcuts: ShortcutList,
+    pub bg_color: Option<String>,
+    pub text_color: Option<String>,
+    pub position_x: Option<i32>,
+    pub position_y: Option<i32>,
 }
 
 /// Supports both flat `shortcuts = [...]` and grouped `[app.shortcuts] group = [...]`

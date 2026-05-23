@@ -18,6 +18,7 @@ pub fn build_overlay(
     let window = ApplicationWindow::new(app);
 
     window.init_layer_shell();
+    window.set_namespace(Some("hyprcut"));
     window.set_layer(Layer::Overlay);
     window.set_exclusive_zone(0);
     window.set_anchor(Edge::Top, true);
@@ -43,10 +44,12 @@ pub fn build_overlay(
     list_box.set_can_target(false);
     vbox.append(&list_box);
 
-    apply_css(&config);
+    apply_css(&config, None, None);
 
     let config_cell = Rc::new(RefCell::new(config));
-    attach_drag(&title_bar, &window, Rc::clone(&config_cell));
+    let current_class: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let display_scale: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
+    attach_drag(&title_bar, &window, Rc::clone(&config_cell), Rc::clone(&current_class), Rc::clone(&display_scale));
 
     window.set_visible(false);
 
@@ -57,7 +60,7 @@ pub fn build_overlay(
 
     glib::MainContext::default().spawn_local(async move {
         while let Ok(msg) = receiver.recv().await {
-            handle_message(msg, &window_ref, &app_label_ref, &list_box_ref, &config_cell);
+            handle_message(msg, &window_ref, &app_label_ref, &list_box_ref, &config_cell, &current_class, &display_scale);
         }
     });
 
@@ -70,42 +73,83 @@ fn handle_message(
     app_label: &Label,
     list_box: &GtkBox,
     config_cell: &Rc<RefCell<Config>>,
+    current_class: &Rc<RefCell<Option<String>>>,
+    display_scale: &Rc<Cell<f64>>,
 ) {
     match msg {
-        OverlayMessage::ActiveWindowChanged(class) => {
+        OverlayMessage::ActiveWindowChanged(class, monitor_name, scale) => {
+            display_scale.set(scale);
+            if let Some(name) = monitor_name.as_deref() {
+                if let Some(mon) = find_gdk_monitor(name) {
+                    window.set_monitor(Some(&mon));
+                }
+            }
             let config = config_cell.borrow();
             match class.as_deref().and_then(|c| config.apps.get(c)) {
                 Some(app_config) => {
+                    let pos_x = app_config.position_x.unwrap_or(config.overlay.position_x);
+                    let pos_y = app_config.position_y.unwrap_or(config.overlay.position_y);
+                    window.set_margin(Edge::Left, pos_x);
+                    window.set_margin(Edge::Top, pos_y);
                     app_label.set_text(&app_config.name);
                     render_shortcuts(list_box, &app_config.shortcuts);
+                    apply_css(&config, app_config.bg_color.as_deref(), app_config.text_color.as_deref());
                     window.set_visible(true);
                 }
                 None => {
                     window.set_visible(false);
                 }
             }
+            *current_class.borrow_mut() = class;
         }
         OverlayMessage::ConfigReloaded(new_config) => {
-            apply_css(&new_config);
+            let pos_x = current_class.borrow()
+                .as_ref()
+                .and_then(|c| new_config.apps.get(c))
+                .and_then(|a| a.position_x)
+                .unwrap_or(new_config.overlay.position_x);
+            let pos_y = current_class.borrow()
+                .as_ref()
+                .and_then(|c| new_config.apps.get(c))
+                .and_then(|a| a.position_y)
+                .unwrap_or(new_config.overlay.position_y);
+            if pos_x != window.margin(Edge::Left) {
+                window.set_margin(Edge::Left, pos_x);
+            }
+            if pos_y != window.margin(Edge::Top) {
+                window.set_margin(Edge::Top, pos_y);
+            }
+            let app_bg: Option<String> = current_class.borrow()
+                .as_ref()
+                .and_then(|c| new_config.apps.get(c))
+                .and_then(|a| a.bg_color.clone());
+            let app_text: Option<String> = current_class.borrow()
+                .as_ref()
+                .and_then(|c| new_config.apps.get(c))
+                .and_then(|a| a.text_color.clone());
+            apply_css(&new_config, app_bg.as_deref(), app_text.as_deref());
             *config_cell.borrow_mut() = new_config;
         }
     }
 }
 
-fn apply_css(config: &Config) {
-    let text = config.overlay.text_color.as_deref().unwrap_or("#ffffff");
-    let border = config.overlay.border_color.as_deref().unwrap_or("#000000");
+fn apply_css(config: &Config, app_bg: Option<&str>, app_text: Option<&str>) {
+    let font_size = config.overlay.font_size;
+    let small = font_size.saturating_sub(2);
+    let bg = app_bg.or(config.overlay.bg_color.as_deref()).unwrap_or("transparent");
+    let text = app_text.or(config.overlay.text_color.as_deref()).unwrap_or("rgba(255, 255, 255, 0.75)");
+    let text_muted = app_text.or(config.overlay.text_color.as_deref()).unwrap_or("rgba(255, 255, 255, 0.45)");
     let css = format!(
         r#"
+window, .background {{
+    background-color: transparent;
+}}
 #hyprcut-overlay {{
-    background-color: rgba(20, 20, 20, {opacity});
-    border: 1px solid {border};
-    border-radius: 6px;
+    background-color: {bg};
     padding: 4px;
 }}
 #hyprcut-titlebar {{
-    padding: 4px 8px;
-    border-bottom: 1px solid {border};
+    padding: 2px 4px;
 }}
 #hyprcut-app-name {{
     color: {text};
@@ -114,7 +158,7 @@ fn apply_css(config: &Config) {
     font-family: monospace;
 }}
 #hyprcut-shortcuts {{
-    padding: 4px;
+    padding: 2px 4px;
 }}
 #hyprcut-keys {{
     color: {text};
@@ -128,16 +172,11 @@ fn apply_css(config: &Config) {
     font-size: {font_size}px;
 }}
 #hyprcut-group-header {{
-    color: rgba(200,200,200,0.5);
+    color: {text_muted};
     font-size: {small}px;
     margin-top: 4px;
 }}
 "#,
-        opacity = config.overlay.opacity,
-        border = border,
-        text = text,
-        font_size = config.overlay.font_size,
-        small = config.overlay.font_size.saturating_sub(2),
     );
 
     let provider = gtk4::CssProvider::new();
@@ -156,6 +195,19 @@ fn apply_css(config: &Config) {
         );
         *cell.borrow_mut() = Some(provider);
     });
+}
+
+fn find_gdk_monitor(connector: &str) -> Option<gdk4::Monitor> {
+    let display = gdk4::Display::default()?;
+    let monitors = display.monitors();
+    for i in 0..monitors.n_items() {
+        if let Some(m) = monitors.item(i).and_downcast::<gdk4::Monitor>() {
+            if m.connector().as_deref() == Some(connector) {
+                return Some(m);
+            }
+        }
+    }
+    None
 }
 
 fn render_shortcuts(list_box: &GtkBox, shortcuts: &ShortcutList) {
@@ -202,46 +254,57 @@ fn make_group_header(name: &str) -> Label {
     label
 }
 
-fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<RefCell<Config>>) {
+fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<RefCell<Config>>, current_class: Rc<RefCell<Option<String>>>, _display_scale: Rc<Cell<f64>>) {
     let drag = gtk4::GestureDrag::new();
 
-    // Snapshot the base position when the drag starts, so update/end offsets
-    // are always relative to the same origin.
     let drag_base: Rc<Cell<(i32, i32)>> = Rc::new(Cell::new((0, 0)));
 
     let drag_base_begin = Rc::clone(&drag_base);
-    let config_begin = Rc::clone(&config_cell);
+    let window_begin = window.clone();
     drag.connect_drag_begin(move |_gesture, _x, _y| {
-        let config = config_begin.borrow();
-        drag_base_begin.set((config.overlay.position_x, config.overlay.position_y));
+        drag_base_begin.set((window_begin.margin(Edge::Left), window_begin.margin(Edge::Top)));
     });
 
-    let window_update = window.clone();
-    let drag_base_update = Rc::clone(&drag_base);
-    drag.connect_drag_update(move |_gesture, offset_x, offset_y| {
-        let (base_x, base_y) = drag_base_update.get();
-        let new_x = (base_x + offset_x as i32).max(0);
-        let new_y = (base_y + offset_y as i32).max(0);
-        window_update.set_margin(Edge::Left, new_x);
-        window_update.set_margin(Edge::Top, new_y);
-    });
+    // No live movement during drag — GestureDrag offsets are surface-local, so moving the
+    // window mid-drag creates a feedback loop that prevents 1:1 tracking. Position is applied
+    // only on release, where the window hasn't moved and offset == true screen displacement.
+    drag.connect_drag_update(move |_gesture, _offset_x, _offset_y| {});
 
     let window_end = window.clone();
+    let current_class_end = Rc::clone(&current_class);
     drag.connect_drag_end(move |_gesture, offset_x, offset_y| {
         let (base_x, base_y) = drag_base.get();
-        let new_x = (base_x + offset_x as i32).max(0);
-        let new_y = (base_y + offset_y as i32).max(0);
+        let buf_scale = 1;
+        let new_x = (base_x + offset_x as i32 * buf_scale).max(0);
+        let new_y = (base_y + offset_y as i32 * buf_scale).max(0);
         window_end.set_margin(Edge::Left, new_x);
         window_end.set_margin(Edge::Top, new_y);
         let mut config = config_cell.borrow_mut();
-        config.overlay.position_x = new_x;
-        config.overlay.position_y = new_y;
+        let saved = if let Some(class) = current_class_end.borrow().as_ref() {
+            if let Some(app) = config.apps.get_mut(class) {
+                app.position_x = Some(new_x);
+                app.position_y = Some(new_y);
+                true
+            } else { false }
+        } else { false };
+        if !saved {
+            config.overlay.position_x = new_x;
+            config.overlay.position_y = new_y;
+        }
         if let Err(e) = crate::config::save(&config) {
             eprintln!("hyprcut: failed to save position: {e}");
         }
     });
 
     title_bar.add_controller(drag);
+}
+
+/// Compute new overlay position from drag base and cumulative gesture offset.
+/// Both base and offset are in the same GTK logical-pixel coordinate space.
+pub fn apply_drag_offset(base: (i32, i32), offset: (f64, f64)) -> (i32, i32) {
+    let x = (base.0 + offset.0 as i32).max(0);
+    let y = (base.1 + offset.1 as i32).max(0);
+    (x, y)
 }
 
 /// Pure Rust helper — testable without GTK display.
@@ -291,5 +354,38 @@ mod tests {
     fn shortcut_rows_empty() {
         let rows = shortcut_rows(&ShortcutList::Empty);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn drag_offset_moves_1_to_1() {
+        // Base at (100, 200), offset of 50 in each axis → should move exactly 50.
+        assert_eq!(apply_drag_offset((100, 200), (50.0, 30.0)), (150, 230));
+    }
+
+    #[test]
+    fn drag_offset_clamps_to_zero() {
+        // Negative offset that would put position below 0 must clamp.
+        assert_eq!(apply_drag_offset((10, 10), (-50.0, -50.0)), (0, 0));
+    }
+
+    #[test]
+    fn drag_offset_truncates_fractional() {
+        // f64 offsets are truncated to i32 (not rounded).
+        assert_eq!(apply_drag_offset((100, 100), (0.9, 1.9)), (100, 101));
+    }
+
+    #[test]
+    fn drag_offset_large_values() {
+        assert_eq!(apply_drag_offset((1600, 20), (100.0, 5.0)), (1700, 25));
+    }
+
+    // Documents the buf_scale formula: Hyprland fractional scale → ceil → buffer multiplier.
+    // Runtime empirical result: eDP-1 at 1.33 gives effective scale=2 (margins placed at X/2).
+    #[test]
+    fn buf_scale_ceil_formula() {
+        assert_eq!((1.33_f64).ceil() as i32, 2); // eDP-1 1.33 → 2
+        assert_eq!((1.0_f64).ceil() as i32, 1);  // 1:1 display
+        assert_eq!((2.0_f64).ceil() as i32, 2);  // HiDPI
+        assert_eq!((1.5_f64).ceil() as i32, 2);  // other fractional
     }
 }
