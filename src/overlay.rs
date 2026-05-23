@@ -1,6 +1,10 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use gtk4::prelude::*;
+
+thread_local! {
+    static CURRENT_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = RefCell::new(None);
+}
 use gtk4::{Application, ApplicationWindow, Box as GtkBox, Label, Orientation};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use crate::config::{Config, ShortcutList};
@@ -138,11 +142,20 @@ fn apply_css(config: &Config) {
 
     let provider = gtk4::CssProvider::new();
     provider.load_from_data(&css);
-    gtk4::style_context_add_provider_for_display(
-        &gdk4::Display::default().unwrap(),
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+
+    let display = gdk4::Display::default().expect("no GDK display — is WAYLAND_DISPLAY set?");
+
+    CURRENT_CSS_PROVIDER.with(|cell| {
+        if let Some(old) = cell.borrow().as_ref() {
+            gtk4::style_context_remove_provider_for_display(&display, old);
+        }
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        *cell.borrow_mut() = Some(provider);
+    });
 }
 
 fn render_shortcuts(list_box: &GtkBox, shortcuts: &ShortcutList) {

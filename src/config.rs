@@ -77,16 +77,19 @@ const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 /// On change, reloads and sends ConfigReloaded via the async channel.
 pub fn watch(sender: async_channel::Sender<crate::state::OverlayMessage>) -> anyhow::Result<()> {
     let path = config_path();
+    let dir = path.parent().expect("config path has no parent").to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = new_debouncer(Duration::from_millis(500), tx)?;
-    debouncer.watcher().watch(&path, RecursiveMode::NonRecursive)?;
+    debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive)?;
 
     std::thread::spawn(move || {
         let _keep_alive = debouncer;
         for result in rx {
             match result {
                 Ok(events) => {
-                    let changed = events.iter().any(|e| e.kind == DebouncedEventKind::Any);
+                    let changed = events.iter().any(|e| {
+                        e.kind == DebouncedEventKind::Any && e.path == path
+                    });
                     if changed {
                         match load() {
                             Ok(config) => {
