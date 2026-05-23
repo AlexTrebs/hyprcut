@@ -17,3 +17,4 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 notify-debouncer-mini = "0.7"
 anyhow = "1"
+async-channel = "2"
