@@ -9,6 +9,7 @@ pub enum OverlayMessage {
     ConfigReloaded(Config),
 }
 
+#[allow(dead_code)]
 pub fn resolve_class<'a>(class: &str, apps: &'a HashMap<String, AppConfig>) -> Option<&'a AppConfig> {
     apps.get(class)
 }
@@ -25,10 +26,9 @@ mod tests {
             shortcuts: ShortcutList::Flat(vec![
                 Shortcut { keys: "Ctrl+T".into(), label: "Test".into() },
             ]),
-            bg_color: None,
-            text_color: None,
-            position_x: None,
-            position_y: None,
+            bg: None,
+            text: None,
+            position: None,
         }
     }
 

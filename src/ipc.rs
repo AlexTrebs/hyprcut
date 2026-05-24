@@ -17,14 +17,18 @@ pub fn start_listener(sender: Sender<OverlayMessage>) -> anyhow::Result<()> {
             .map(|w| normalize_class(&w.class))
             .filter(|c| !c.is_empty());
         let monitor_info = Client::get_active()
+            .map_err(|e| eprintln!("hyprcut: active client query failed: {e}"))
             .ok()
             .flatten()
             .and_then(|client| {
-                Monitors::get().ok().and_then(|monitors| {
-                    monitors.into_iter()
-                        .find(|m| Some(m.id) == client.monitor)
-                        .map(|m| (m.name.clone(), m.scale as f64))
-                })
+                Monitors::get()
+                    .map_err(|e| eprintln!("hyprcut: monitors query failed: {e}"))
+                    .ok()
+                    .and_then(|monitors| {
+                        monitors.into_iter()
+                            .find(|m| Some(m.id) == client.monitor)
+                            .map(|m| (m.name.clone(), m.scale as f64))
+                    })
             });
         let monitor_name = monitor_info.as_ref().map(|(n, _)| n.clone());
         let display_scale = monitor_info.map(|(_, s)| s).unwrap_or(1.0);

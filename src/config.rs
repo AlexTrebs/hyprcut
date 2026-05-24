@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebouncedEventKind};
@@ -14,13 +15,15 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OverlayConfig {
-    pub position_x: i32,
-    pub position_y: i32,
+    pub position: [i32; 2],
     pub opacity: f64,
     pub font_size: u32,
-    pub bg_color: Option<String>,
-    pub text_color: Option<String>,
+    #[serde(alias = "bg_color")]
+    pub bg: Option<String>,
+    #[serde(alias = "text_color")]
+    pub text: Option<String>,
     pub border_color: Option<String>,
+    pub font_family: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -28,10 +31,11 @@ pub struct AppConfig {
     pub name: String,
     #[serde(default)]
     pub shortcuts: ShortcutList,
-    pub bg_color: Option<String>,
-    pub text_color: Option<String>,
-    pub position_x: Option<i32>,
-    pub position_y: Option<i32>,
+    #[serde(alias = "bg_color")]
+    pub bg: Option<String>,
+    #[serde(alias = "text_color")]
+    pub text: Option<String>,
+    pub position: Option<[i32; 2]>,
 }
 
 /// Supports both flat `shortcuts = [...]` and grouped `[app.shortcuts] group = [...]`
@@ -61,12 +65,99 @@ pub fn load() -> anyhow::Result<Config> {
         create_default(&path)?;
     }
     let text = fs::read_to_string(&path)?;
-    Ok(toml::from_str(&text)?)
+    let mut config: Config = toml::from_str(&text)?;
+    // Normalize keys to lowercase so they match IPC window classes
+    config.apps = config.apps.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
+    Ok(config)
 }
 
-pub fn save(config: &Config) -> anyhow::Result<()> {
-    let text = toml::to_string_pretty(config)?;
-    fs::write(config_path(), text)?;
+pub fn save(config: &Config, skip: &AtomicBool) -> anyhow::Result<()> {
+    use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table};
+
+    let mut doc = DocumentMut::new();
+
+    // [overlay]
+    let ov = doc.entry("overlay").or_insert(Item::Table(Table::new()));
+    let ov = ov.as_table_mut().unwrap();
+    let mut pos = Array::new();
+    pos.push(config.overlay.position[0] as i64);
+    pos.push(config.overlay.position[1] as i64);
+    ov["position"] = value(pos);
+    ov["opacity"] = value(config.overlay.opacity);
+    ov["font_size"] = value(config.overlay.font_size as i64);
+    if let Some(ref bg) = config.overlay.bg {
+        ov["bg"] = value(bg.as_str());
+    }
+    if let Some(ref text) = config.overlay.text {
+        ov["text"] = value(text.as_str());
+    }
+    if let Some(ref font) = config.overlay.font_family {
+        ov["font_family"] = value(font.as_str());
+    }
+
+    // [apps.*]
+    let apps = doc.entry("apps").or_insert(Item::Table(Table::new()));
+    let apps = apps.as_table_mut().unwrap();
+    apps.set_implicit(true);
+
+    let mut sorted: Vec<_> = config.apps.iter().collect();
+    sorted.sort_by_key(|(k, _)| k.as_str());
+
+    for (class, app) in sorted {
+        let app_t = apps.entry(class.as_str()).or_insert(Item::Table(Table::new()));
+        let app_t = app_t.as_table_mut().unwrap();
+
+        app_t["name"] = value(app.name.as_str());
+        if let Some([x, y]) = app.position {
+            let mut p = Array::new();
+            p.push(x as i64);
+            p.push(y as i64);
+            app_t["position"] = value(p);
+        }
+        if let Some(ref bg) = app.bg {
+            app_t["bg"] = value(bg.as_str());
+        }
+        if let Some(ref text) = app.text {
+            app_t["text"] = value(text.as_str());
+        }
+
+        match &app.shortcuts {
+            ShortcutList::Flat(list) => {
+                let mut arr = Array::new();
+                for s in list {
+                    let mut t = InlineTable::new();
+                    t.insert("keys", toml_edit::Value::from(s.keys.as_str()));
+                    t.insert("label", toml_edit::Value::from(s.label.as_str()));
+                    arr.push(t);
+                }
+                app_t["shortcuts"] = value(arr);
+            }
+            ShortcutList::Grouped(groups) => {
+                let sc = app_t.entry("shortcuts").or_insert(Item::Table(Table::new()));
+                let sc = sc.as_table_mut().unwrap();
+                let mut sorted_groups: Vec<_> = groups.iter().collect();
+                sorted_groups.sort_by_key(|(k, _)| k.as_str());
+                for (group, list) in sorted_groups {
+                    let mut arr = Array::new();
+                    for s in list {
+                        let mut t = InlineTable::new();
+                        t.insert("keys", toml_edit::Value::from(s.keys.as_str()));
+                        t.insert("label", toml_edit::Value::from(s.label.as_str()));
+                        arr.push(t);
+                    }
+                    sc[group.as_str()] = value(arr);
+                }
+            }
+            ShortcutList::Empty => {}
+        }
+    }
+
+    let text = doc.to_string();
+    let path = config_path();
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, &text)?;
+    skip.store(true, Ordering::SeqCst);
+    fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -80,12 +171,15 @@ const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
 
 /// Starts a background thread watching the config file for changes.
 /// On change, reloads and sends ConfigReloaded via the async channel.
-pub fn watch(sender: async_channel::Sender<crate::state::OverlayMessage>) -> anyhow::Result<()> {
+pub fn watch(sender: async_channel::Sender<crate::state::OverlayMessage>) -> anyhow::Result<Arc<AtomicBool>> {
     let path = config_path();
     let dir = path.parent().expect("config path has no parent").to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = new_debouncer(Duration::from_millis(500), tx)?;
     debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive)?;
+
+    let skip = Arc::new(AtomicBool::new(false));
+    let skip_watch = Arc::clone(&skip);
 
     std::thread::spawn(move || {
         let _keep_alive = debouncer;
@@ -96,6 +190,9 @@ pub fn watch(sender: async_channel::Sender<crate::state::OverlayMessage>) -> any
                         e.kind == DebouncedEventKind::Any && e.path == path
                     });
                     if changed {
+                        if skip_watch.swap(false, Ordering::SeqCst) {
+                            continue; // triggered by our own drag-save, skip to avoid CSS flash
+                        }
                         match load() {
                             Ok(config) => {
                                 let _ = sender.send_blocking(crate::state::OverlayMessage::ConfigReloaded(config));
@@ -109,7 +206,7 @@ pub fn watch(sender: async_channel::Sender<crate::state::OverlayMessage>) -> any
         }
     });
 
-    Ok(())
+    Ok(skip)
 }
 
 #[cfg(test)]
@@ -120,8 +217,7 @@ mod tests {
     fn parse_flat_shortcuts() {
         let raw = r#"
 [overlay]
-position_x = 100
-position_y = 50
+position = [100, 50]
 opacity = 0.75
 font_size = 14
 
@@ -148,8 +244,7 @@ shortcuts = [
     fn parse_grouped_shortcuts() {
         let raw = r#"
 [overlay]
-position_x = 0
-position_y = 0
+position = [0, 0]
 opacity = 0.75
 font_size = 14
 
@@ -176,8 +271,7 @@ navigation = [
     fn missing_shortcuts_field_defaults_to_empty() {
         let raw = r#"
 [overlay]
-position_x = 0
-position_y = 0
+position = [0, 0]
 opacity = 0.75
 font_size = 14
 

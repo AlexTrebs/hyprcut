@@ -12,13 +12,16 @@ fn main() -> anyhow::Result<()> {
     let app = Application::builder().application_id(APP_ID).build();
 
     app.connect_activate(|app| {
+        if !app.windows().is_empty() {
+            return;
+        }
         let config = config::load().expect("failed to load config");
 
         // Single async_channel for all messages to the overlay
         let (sender, receiver) = async_channel::bounded::<state::OverlayMessage>(64);
 
         // Config file watcher → sends ConfigReloaded directly via async_channel
-        config::watch(sender.clone()).expect("failed to start config watcher");
+        let skip_reload = config::watch(sender.clone()).expect("failed to start config watcher");
 
         // IPC listener uses mpsc internally; bridge to async_channel
         let (mpsc_tx, mpsc_rx) = std::sync::mpsc::channel::<state::OverlayMessage>();
@@ -34,7 +37,7 @@ fn main() -> anyhow::Result<()> {
             }
         });
 
-        overlay::build_overlay(app, config, receiver);
+        overlay::build_overlay(app, config, receiver, skip_reload);
     });
 
     app.run();

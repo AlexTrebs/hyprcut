@@ -1,10 +1,10 @@
 [overlay]
-position_x = 100
-position_y = 100
+position = [100, 100]
 opacity = 0.75
 font_size = 14
-# bg_color = "transparent"
-text_color = "rgba(255, 255, 255, 0.75)"
+# bg = "transparent"
+text = "rgba(255, 255, 255, 0.75)"
+# font_family = "JetBrains Mono"
 
 # ─── Zen Browser ─────────────────────────────────────────────────────────────
 # Find your window class with: hyprctl activewindow
@@ -42,7 +42,7 @@ nvim = [
 ]
 
 # ─── DaVinci Resolve ─────────────────────────────────────────────────────────
-# Verify class with: hyprctl activewindow (may be "resolve" or "DaVinciResolve")
+# Verify class with: hyprctl activewindow (may be "resolve" or "davinciresolve")
 [apps.resolve]
 name = "DaVinci Resolve"
 

@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{Arc, atomic::AtomicBool};
 use gtk4::prelude::*;
 
 thread_local! {
@@ -14,6 +15,7 @@ pub fn build_overlay(
     app: &Application,
     config: Config,
     receiver: async_channel::Receiver<OverlayMessage>,
+    skip_reload: Arc<AtomicBool>,
 ) {
     let window = ApplicationWindow::new(app);
 
@@ -25,8 +27,8 @@ pub fn build_overlay(
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Bottom, false);
     window.set_anchor(Edge::Right, false);
-    window.set_margin(Edge::Top, config.overlay.position_y);
-    window.set_margin(Edge::Left, config.overlay.position_x);
+    window.set_margin(Edge::Top, config.overlay.position[1]);
+    window.set_margin(Edge::Left, config.overlay.position[0]);
 
     let vbox = GtkBox::new(Orientation::Vertical, 0);
     vbox.set_widget_name("hyprcut-overlay");
@@ -49,7 +51,7 @@ pub fn build_overlay(
     let config_cell = Rc::new(RefCell::new(config));
     let current_class: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let display_scale: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
-    attach_drag(&title_bar, &window, Rc::clone(&config_cell), Rc::clone(&current_class), Rc::clone(&display_scale));
+    attach_drag(&title_bar, &window, Rc::clone(&config_cell), Rc::clone(&current_class), Rc::clone(&display_scale), skip_reload);
 
     window.set_visible(false);
 
@@ -87,13 +89,13 @@ fn handle_message(
             let config = config_cell.borrow();
             match class.as_deref().and_then(|c| config.apps.get(c)) {
                 Some(app_config) => {
-                    let pos_x = app_config.position_x.unwrap_or(config.overlay.position_x);
-                    let pos_y = app_config.position_y.unwrap_or(config.overlay.position_y);
+                    let pos_x = app_config.position.map(|[x, _]| x).unwrap_or(config.overlay.position[0]);
+                    let pos_y = app_config.position.map(|[_, y]| y).unwrap_or(config.overlay.position[1]);
                     window.set_margin(Edge::Left, pos_x);
                     window.set_margin(Edge::Top, pos_y);
                     app_label.set_text(&app_config.name);
                     render_shortcuts(list_box, &app_config.shortcuts);
-                    apply_css(&config, app_config.bg_color.as_deref(), app_config.text_color.as_deref());
+                    apply_css(&config, app_config.bg.as_deref(), app_config.text.as_deref());
                     window.set_visible(true);
                 }
                 None => {
@@ -103,42 +105,59 @@ fn handle_message(
             *current_class.borrow_mut() = class;
         }
         OverlayMessage::ConfigReloaded(new_config) => {
-            let pos_x = current_class.borrow()
-                .as_ref()
-                .and_then(|c| new_config.apps.get(c))
-                .and_then(|a| a.position_x)
-                .unwrap_or(new_config.overlay.position_x);
-            let pos_y = current_class.borrow()
-                .as_ref()
-                .and_then(|c| new_config.apps.get(c))
-                .and_then(|a| a.position_y)
-                .unwrap_or(new_config.overlay.position_y);
+            // Single borrow of current_class — snapshot to avoid repeated locks
+            let current = current_class.borrow().clone();
+            let app = current.as_deref().and_then(|c| new_config.apps.get(c));
+
+            let pos_x = app.and_then(|a| a.position).map(|[x, _]| x)
+                .unwrap_or(new_config.overlay.position[0]);
+            let pos_y = app.and_then(|a| a.position).map(|[_, y]| y)
+                .unwrap_or(new_config.overlay.position[1]);
             if pos_x != window.margin(Edge::Left) {
                 window.set_margin(Edge::Left, pos_x);
             }
             if pos_y != window.margin(Edge::Top) {
                 window.set_margin(Edge::Top, pos_y);
             }
-            let app_bg: Option<String> = current_class.borrow()
-                .as_ref()
-                .and_then(|c| new_config.apps.get(c))
-                .and_then(|a| a.bg_color.clone());
-            let app_text: Option<String> = current_class.borrow()
-                .as_ref()
-                .and_then(|c| new_config.apps.get(c))
-                .and_then(|a| a.text_color.clone());
-            apply_css(&new_config, app_bg.as_deref(), app_text.as_deref());
+            apply_css(&new_config, app.and_then(|a| a.bg.as_deref()), app.and_then(|a| a.text.as_deref()));
+            // Re-render shortcuts so live edits to config.toml take effect immediately
+            if window.is_visible() {
+                if let Some(app_cfg) = app {
+                    app_label.set_text(&app_cfg.name);
+                    render_shortcuts(list_box, &app_cfg.shortcuts);
+                }
+            }
             *config_cell.borrow_mut() = new_config;
         }
     }
 }
 
+fn is_safe_css_color(s: &str) -> bool {
+    let s = s.trim();
+    if matches!(s, "transparent" | "none") { return true; }
+    if s.starts_with('#') {
+        return matches!(s.len(), 4 | 5 | 7 | 9) && s[1..].chars().all(|c| c.is_ascii_hexdigit());
+    }
+    if s.starts_with("rgb(") || s.starts_with("rgba(") {
+        return !s.contains([';', '{', '}', '"', '\'', '\\']);
+    }
+    !s.contains([';', '{', '}', '"', '\'', '\\', '<', '>'])
+}
+
 fn apply_css(config: &Config, app_bg: Option<&str>, app_text: Option<&str>) {
     let font_size = config.overlay.font_size;
     let small = font_size.saturating_sub(2);
-    let bg = app_bg.or(config.overlay.bg_color.as_deref()).unwrap_or("transparent");
-    let text = app_text.or(config.overlay.text_color.as_deref()).unwrap_or("rgba(255, 255, 255, 0.75)");
-    let text_muted = app_text.or(config.overlay.text_color.as_deref()).unwrap_or("rgba(255, 255, 255, 0.45)");
+    let font = config.overlay.font_family.as_deref().unwrap_or("monospace");
+    let bg_raw = app_bg.or(config.overlay.bg.as_deref()).unwrap_or("transparent");
+    let text_raw = app_text.or(config.overlay.text.as_deref()).unwrap_or("rgba(255, 255, 255, 0.75)");
+    let text_muted_raw = app_text.or(config.overlay.text.as_deref()).unwrap_or("rgba(255, 255, 255, 0.45)");
+    let bg = if is_safe_css_color(bg_raw) { bg_raw } else { eprintln!("hyprcut: unsafe bg color ignored"); "transparent" };
+    let text = if is_safe_css_color(text_raw) { text_raw } else { eprintln!("hyprcut: unsafe text color ignored"); "rgba(255, 255, 255, 0.75)" };
+    let text_muted = if is_safe_css_color(text_muted_raw) { text_muted_raw } else { "rgba(255, 255, 255, 0.45)" };
+    let border_css = match config.overlay.border_color.as_deref() {
+        Some(c) if is_safe_css_color(c) => format!("border: 1px solid {c};"),
+        _ => "border: none;".to_string(),
+    };
     let css = format!(
         r#"
 window, .background {{
@@ -146,6 +165,7 @@ window, .background {{
 }}
 #hyprcut-overlay {{
     background-color: {bg};
+    {border_css}
     padding: 4px;
 }}
 #hyprcut-titlebar {{
@@ -155,7 +175,7 @@ window, .background {{
     color: {text};
     font-weight: bold;
     font-size: {font_size}px;
-    font-family: monospace;
+    font-family: {font};
 }}
 #hyprcut-shortcuts {{
     padding: 2px 4px;
@@ -164,7 +184,7 @@ window, .background {{
     color: {text};
     font-weight: bold;
     font-size: {font_size}px;
-    font-family: monospace;
+    font-family: {font};
     min-width: 140px;
 }}
 #hyprcut-label {{
@@ -254,7 +274,7 @@ fn make_group_header(name: &str) -> Label {
     label
 }
 
-fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<RefCell<Config>>, current_class: Rc<RefCell<Option<String>>>, _display_scale: Rc<Cell<f64>>) {
+fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<RefCell<Config>>, current_class: Rc<RefCell<Option<String>>>, display_scale: Rc<Cell<f64>>, skip_reload: Arc<AtomicBool>) {
     let drag = gtk4::GestureDrag::new();
 
     let drag_base: Rc<Cell<(i32, i32)>> = Rc::new(Cell::new((0, 0)));
@@ -272,9 +292,10 @@ fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<R
 
     let window_end = window.clone();
     let current_class_end = Rc::clone(&current_class);
+    let display_scale_end = Rc::clone(&display_scale);
     drag.connect_drag_end(move |_gesture, offset_x, offset_y| {
         let (base_x, base_y) = drag_base.get();
-        let buf_scale = 1;
+        let buf_scale = display_scale_end.get().ceil() as i32;
         let new_x = (base_x + offset_x as i32 * buf_scale).max(0);
         let new_y = (base_y + offset_y as i32 * buf_scale).max(0);
         window_end.set_margin(Edge::Left, new_x);
@@ -282,16 +303,14 @@ fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<R
         let mut config = config_cell.borrow_mut();
         let saved = if let Some(class) = current_class_end.borrow().as_ref() {
             if let Some(app) = config.apps.get_mut(class) {
-                app.position_x = Some(new_x);
-                app.position_y = Some(new_y);
+                app.position = Some([new_x, new_y]);
                 true
             } else { false }
         } else { false };
         if !saved {
-            config.overlay.position_x = new_x;
-            config.overlay.position_y = new_y;
+            config.overlay.position = [new_x, new_y];
         }
-        if let Err(e) = crate::config::save(&config) {
+        if let Err(e) = crate::config::save(&config, &skip_reload) {
             eprintln!("hyprcut: failed to save position: {e}");
         }
     });
@@ -301,6 +320,7 @@ fn attach_drag(title_bar: &GtkBox, window: &ApplicationWindow, config_cell: Rc<R
 
 /// Compute new overlay position from drag base and cumulative gesture offset.
 /// Both base and offset are in the same GTK logical-pixel coordinate space.
+#[allow(dead_code)]
 pub fn apply_drag_offset(base: (i32, i32), offset: (f64, f64)) -> (i32, i32) {
     let x = (base.0 + offset.0 as i32).max(0);
     let y = (base.1 + offset.1 as i32).max(0);
@@ -308,6 +328,7 @@ pub fn apply_drag_offset(base: (i32, i32), offset: (f64, f64)) -> (i32, i32) {
 }
 
 /// Pure Rust helper — testable without GTK display.
+#[allow(dead_code)]
 pub fn shortcut_rows(shortcuts: &ShortcutList) -> Vec<(String, String)> {
     match shortcuts {
         ShortcutList::Flat(list) => list.iter().map(|s| (s.keys.clone(), s.label.clone())).collect(),
