@@ -2,7 +2,7 @@
 
 A keyboard shortcut overlay for Hyprland. Shows shortcuts for whichever app is focused — disappears when you switch to an unconfigured window.
 
-![hyprcut overlay showing shortcuts for Zen Browser](docs/screenshot.png)
+![hyprcut overlay showing shortcuts for nvim-terminal](docs/screenshot.png)
 
 > **Note:** drag the overlay's title bar to reposition it. Position is saved per-app.
 
